@@ -1,0 +1,10 @@
+{
+  "name": "benchiq",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "BenchIQ — Lab Intelligence Engine (inventory, ordering & research assistant)",
+  "engines": {
+    "node": ">=18"
+  }
+}
