@@ -664,8 +664,43 @@ function askInv(q){
 /* These describe the request, not a reagent. "last" is the one that bit:
    it is a substring of blasticidin and fibroblasts, so "undo that last change"
    came back as two confident, unrelated matches. */
-const SEARCH_STOP=new Set(['undo','undone','revert','reverted','restore','restored','cancel','cancelled','canceled','reverse','rollback','change','changes','changed','update','updates','updated','last','latest','previous','recent','that','this','these','those','thing','item','items','entry','entries','inventory','stock','again','back','please','just','make','made','something','anything','everything','what','which','were','have','from','with','about','there','their','them']);
+const SEARCH_STOP=new Set(['undo','undone','revert','reverted','restore','restored','cancel','cancelled','canceled','reverse','rollback','change','changes','changed','update','updates','updated','last','latest','previous','recent','that','this','these','those','thing','item','items','entry','entries','inventory','stock','again','back','please','just','make','made','something','anything','everything','what','which','were','have','from','with','about','there','their','them',
+  // status vocabulary — these describe the change, never the reagent. "stock" is
+  // the dangerous one: 24 catalogued items have it in their name.
+  'stock','stocks','empty','used','gone','none','left','more','depleted','reorder','finished','remaining','out']);
 function searchTerms(term){ return term.split(' ').filter(w=>w.length>3&&!SEARCH_STOP.has(w)); }
+
+/* "Urea is out of stock" then "it is out of stock" — the second message names no
+   reagent, and every message here is otherwise read from scratch. Without this,
+   "it" fell through to a word match and picked an unrelated row, on the one code
+   path that writes to the sheet.
+
+   LAST_ITEM holds the sheet ID the conversation last settled on, and is only set
+   when exactly one item was resolved — "found 2 matches" leaves "it" ambiguous,
+   so context is cleared rather than guessed at. */
+let LAST_ITEM=null;
+const PRONOUN_RE=/\b(it|its|it's|that|this|them|they|those|these|the same|same one)\b/;
+function rememberItem(m){ LAST_ITEM=m?m[5]:null; }
+function itemById(id){ return id?(ITEMS.find(it=>it[5]===id)||null):null; }
+
+/* Returns {item, viaContext}. viaContext means the caller MUST tell the user the
+   pronoun was resolved from the previous turn, so a wrong guess is visible before
+   anything is written. */
+function resolveItem(l,stripRe){
+  const term=l.replace(stripRe,' ').replace(/[^a-z0-9\s-]/g,' ').replace(/\s+/g,' ').trim();
+  let m=null;
+  if(term.length>2) m=ITEMS.find(it=>it[0].toLowerCase().includes(term));
+  if(!m){
+    const w=searchTerms(term);
+    if(w.length) m=ITEMS.find(it=>w.some(x=>it[0].toLowerCase().includes(x)));
+  }
+  if(m) return {item:m,viaContext:false};
+  if(PRONOUN_RE.test(l)){
+    const prev=itemById(LAST_ITEM);
+    if(prev) return {item:prev,viaContext:true};
+  }
+  return {item:null,viaContext:false};
+}
 
 function invSearch(q,l){
   if(!dataReady('invConv')) return;
@@ -687,6 +722,7 @@ function invSearch(q,l){
     return '<tr><td class="name">'+esc(m[0])+'</td><td><span class="loc-chip '+envClass(m[1])+'">'+esc(envLabel(m[1]))+'</span></td><td>'+esc(m[2])+'</td><td>'+esc(m[6]||'—')+'</td><td>'+qty+'</td><td>'+haz+'</td><td>'+sdsCell(m)+'</td></tr>';
   }).join('');
   const first=matches[0];
+  rememberItem(matches.length===1?first:null);   // "it" is only unambiguous with one hit
   const lead = matches.length===1
     ? 'Found <b>'+esc(first[0])+'</b> — it\'s in the <b>'+esc(envLabel(first[1]))+'</b>, <b>'+esc(first[2])+'</b>.'+(first[3]?' Handle with care: flagged <b>'+esc(first[3])+'</b>.':'')
     : 'Found <b>'+matches.length+' matches</b> for "'+esc(term)+'". Here\'s where each one lives:';
@@ -978,9 +1014,11 @@ function invRevert(q,l){
 
 function invUpdate(q,l){
   if(!dataReady('invConv')) return;
-  // find the item mentioned
-  let term=l.replace(/we|used up|used the last|use the last|ran out of|ran out|finished|is empty|we're out|were out|out of|the|of|remove|delete|took the last|mark|as|,/g,' ').replace(/\s+/g,' ').trim();
-  let m=ITEMS.find(it=>it[0].toLowerCase().includes(term)) || ITEMS.find(it=>{const w=term.split(' ').filter(x=>x.length>3); return w.some(x=>it[0].toLowerCase().includes(x));});
+  // find the item mentioned — same resolver the rest of the app uses
+  const UPDATE_STRIP=/we|used up|used the last|use the last|ran out of|ran out|finished|is empty|we're out|were out|out of|the|of|remove|delete|took the last|mark|as|,/g;
+  const term=l.replace(UPDATE_STRIP,' ').replace(/\s+/g,' ').trim();
+  const res=resolveItem(l,UPDATE_STRIP);
+  const m=res.item;
   if(!m){
     // No matched row means no sheet ID, and without an ID there is nothing to write to.
     // Offering a confirm button here would be a button that cannot do anything.
@@ -989,8 +1027,11 @@ function invUpdate(q,l){
     return;
   }
   const qtyNow=m[7]===null?'not recorded':String(m[7]);
+  rememberItem(m);
   pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div>'+
-    '<div class="answer-lead">Got it — I can update the inventory. Because this changes shared lab data, here\'s exactly what I\'m about to write. Confirm and it goes to the sheet.</div>'+
+    '<div class="answer-lead">'+(res.viaContext
+      ? 'Taking "'+esc(q.trim())+'" to mean <b>'+esc(m[0])+'</b>, from your previous message. If that\'s the wrong item, say the name and I\'ll redo it.'
+      : 'Got it — I can update the inventory.')+' Because this changes shared lab data, here\'s exactly what I\'m about to write. Confirm and it goes to the sheet.</div>'+
     '<div class="confirm"><div class="confirm-h"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>Proposed inventory update</div>'+
     '<div class="confirm-row"><span>Item</span><span>'+esc(m[0])+'</span></div>'+
     '<div class="confirm-row"><span>Sheet row</span><span class="mono">'+esc(m[5])+'</span></div>'+
@@ -1053,6 +1094,7 @@ function invSDS(q,l){
     pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div><div class="answer-lead">I couldn\'t match <b>'+esc(term||q)+'</b> to a catalogued item. Try the exact reagent name as it appears in the sheet.</div></div>');
     return;
   }
+  rememberItem(m);
   const url=sdsUrl(m[4],m[0]);
   const known=!!m[3];
   pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div>'+
