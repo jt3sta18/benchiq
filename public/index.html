@@ -649,9 +649,12 @@ function askInv(q){
   // where "last" would match inside names like "b-last-icidin".
   if(REVERT_RE.test(l)){
     invRevert(q,l);
+  } else if(ADD_RE.test(l)){
+    // must precede the ordering branch: "we just purchased X" matches /purchas/
+    invAdd(q,l);
   } else if(/\bsds\b|\bmsds\b|safety (data )?sheet|\bppe\b|protective equip|how (do i|to) (store|handle|dispose)|dispose of|disposal|first aid|spill|hazards? (of|for)/.test(l)){
     invSDS(q,l);
-  } else if(/spend|spent|cost|budget|paid|price|invoice|\$|vendor|supplier|fisher|sigma|abcam|rpeptide|nicoya|order(ed|ing)?\b|purchas|last order/.test(l) && !/where|located|find|do we have/.test(l)){
+  } else if((SPEND_RE.test(l)||mentionsGrant(l)) && !/where|located|find|do we have/.test(l)){
     invOrdering(q,l);
   } else if(/used up|ran out|use the last|used the last|finished|is empty|we're out|were out|out of|remove|delete|took the last|add new|received|log a|mark/.test(l)){
     invUpdate(q,l);
@@ -950,6 +953,62 @@ function invSpendOverview(){
     '<div class="panel-h" style="margin-top:18px">Spend by grant</div>'+moneyBars(grants,'')+
     '</div>'+unpricedLine(ORDERS)+
     '<div class="followups" style="margin-top:14px">'+grantsChips()+'</div>'+
+    '</div>');
+}
+
+/* Spend routing. The prototype listed vendor names here — fisher|sigma|abcam|
+   rpeptide|nicoya — of which three are not in the real data at all, while the
+   other two collide with reagent names: "sigma" is inside Sigmacote, and the
+   vendor "Peptide 2.0" would drag 22 peptide items into the spend branch. So
+   route on what someone is DOING (spending, buying, ordering), not on names.
+
+   Grants are the one entity safe to match bare: R21, R03 and FDOH are
+   distinctive and appear in no item name. Read from the data, not listed here. */
+const SPEND_RE=/\bspend|\bspent|\bspending|\bcost|\bbudget|\bpaid\b|\bprice|\binvoice|\$|\bvendor|\bsupplier|\border(ed|ing|s)?\b|\bpurchas|\bbuy\b|\bbought\b|\bbuying\b|\bquote\b|\breceipt\b/;
+function mentionsGrant(l){
+  if(!ORDERS.length) return false;
+  for(const g of distinct(ORDERS,o=>o.grant)){
+    if(new RegExp('\\b'+escRe(g.toLowerCase())+'\\b').test(l)) return true;
+  }
+  return false;
+}
+
+/* ─────────── ADD A NEW ITEM ───────────
+   The app cannot do this. The sheet proxy exposes three actions — version, data
+   and update — and update only writes six fields to a row matched by an ID that
+   already exists. There is no append. Creating a row needs a new action in the
+   Apps Script, which lives in Google, not in this repo.
+
+   Recognised here anyway, because "can you add this to the inventory?" otherwise
+   matched /purchas/ and came back as a spend lookup for an unrelated reagent —
+   an answer that looks like it did something. Better to say what it cannot do,
+   and check whether the item is already catalogued, which it often is. */
+const ADD_RE=/\b(add|create|log|enter|register|catalogue|catalog)\b[^.?!]*\b(to|into|in|on)\b[^.?!]*\b(inventory|sheet|list|stock|system|database)\b|\badd (a |an |the )?new\b|\bnew (item|entry|reagent)\b|\bwe (just )?(bought|purchased|received|got)\b[^.?!]*\badd\b/;
+
+function invAdd(q,l){
+  if(!dataReady('invConv')) return;
+  // what did they call it? strip the request scaffolding, keep the noun
+  const term=l.replace(ADD_RE,' ')
+              .replace(/\b(we|just|purchased|bought|received|got|can|you|please|this|it|the|a|an|to|into|in|of|our|new|some|more|and|for)\b/g,' ')
+              .replace(/[^a-z0-9\s-]/g,' ').replace(/\s+/g,' ').trim();
+  const words=searchTerms(term);
+  let near=[];
+  if(term.length>2) near=ITEMS.filter(it=>it[0].toLowerCase().includes(term));
+  if(!near.length&&words.length) near=ITEMS.filter(it=>words.some(w=>it[0].toLowerCase().includes(w)));
+  if(near.length===1) rememberItem(near[0]); else rememberItem(null);
+
+  const rows=near.slice(0,6).map(m=>
+    '<tr><td class="name">'+esc(m[0])+'</td><td><span class="loc-chip '+envClass(m[1])+'">'+esc(envLabel(m[1]))+'</span></td><td>'+esc(m[2])+'</td><td>'+esc(m[6]||'—')+'</td><td class="mono">'+esc(m[5])+'</td></tr>').join('');
+
+  pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div>'+
+    '<div class="answer-lead"><b>I can\'t add new items to the inventory</b> — that isn\'t something this app can do. It can only change six fields on rows that already exist: Status, Qty, Notes, Hazard, CAS and Location. There\'s no way for it to create a row.</div>'+
+    '<div class="opp-badge">◆ NOT SUPPORTED — READ THIS INSTEAD</div>'+
+    (near.length
+      ? '<div class="answer-lead" style="margin-top:4px">Before you add it by hand — <b>'+(near.length===1?'this is already catalogued':near.length+' similar items are already catalogued')+'</b>. Check whether one of these is the same reagent under a different name:</div>'+
+        '<div class="tbl-wrap"><table class="data"><thead><tr><th>Reagent</th><th>Storage</th><th>Location</th><th>Status</th><th>Sheet row</th></tr></thead><tbody>'+rows+'</tbody></table>'+
+        '<div class="tbl-foot"><span>'+near.length+' possible match'+(near.length===1?'':'es')+' for "'+esc(term)+'"</span></div></div>'
+      : '<div class="gap-note" style="margin-top:12px">Nothing in the '+ITEMS.length+' catalogued items looks like "<b>'+esc(term||q)+'</b>", so it does appear to be new.</div>')+
+    '<div class="gap-note" style="margin-top:12px"><b>To add it for real:</b> type the row straight into the Google Sheet. This page polls for changes every 45 seconds, so it will show up here on its own — no reload needed.<br><br>Making this app able to add rows means adding a create action to the Apps Script and a matching write path here. That\'s a real change, not a wording fix.</div>'+
     '</div>');
 }
 
