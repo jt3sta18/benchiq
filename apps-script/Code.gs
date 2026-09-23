@@ -1,3 +1,9 @@
+// ============================================================================
+//  THIS IS  Code.gs  —  paste into the file named  Code.gs
+//  It contains buildAll(). It has NO doGet / doPost.
+//  If you are looking at the file named Endpoints, this is the WRONG file.
+// ============================================================================
+
 /**
  * BenchIQ — Step 1: import the lab tabs into normalized Inventory and Orders tabs.
  *

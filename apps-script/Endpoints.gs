@@ -1,3 +1,9 @@
+// ============================================================================
+//  THIS IS  Endpoints.gs  —  paste into the file named  Endpoints
+//  It contains doGet() and doPost(). It has NO buildAll().
+//  If you are looking at the file named Code, this is the WRONG file.
+// ============================================================================
+
 /**
  * BenchIQ — Step 2: read/write endpoints.
  *
