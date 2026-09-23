@@ -527,6 +527,75 @@ function json_(obj) {
                        .setMimeType(ContentService.MimeType.JSON);
 }
 
+/* ───────────────────────────── maintenance ─────────────────────────────── */
+
+/**
+ * Deletes rows by ID. There is no delete action on the web app — nothing the
+ * browser can reach removes a row — so this is the editor-side tool for undoing
+ * a mistaken entry or clearing test data.
+ *
+ * Run it from the editor: pick the function, press Run. No deployment needed,
+ * because this is not reached through the web app at all.
+ *
+ * It reports what it removed and what it could not find, and never touches a
+ * row whose id is not in the list.
+ */
+function deleteRowsByIds_(ids) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var wanted = {};
+  ids.forEach(function (i) { wanted[String(i).trim()] = true; });
+
+  var removed = [], stamp = new Date();
+
+  [INVENTORY_TAB, ORDERS_TAB].forEach(function (tabName) {
+    var sheet = ss.getSheetByName(tabName);
+    if (!sheet || sheet.getLastRow() < 2) return;
+
+    var values = sheet.getDataRange().getValues();
+    var col = {};
+    values[0].forEach(function (h, i) { col[String(h).trim()] = i; });
+    var nameCol = col['Item'] !== undefined ? col['Item'] : col['Description'];
+
+    // Bottom up, so deleting a row cannot shift the ones still to be checked.
+    for (var r = values.length - 1; r >= 1; r--) {
+      var id = String(values[r][col['ID']]).trim();
+      if (!wanted[id]) continue;
+      var label = nameCol === undefined ? '' : String(values[r][nameCol]);
+      sheet.deleteRow(r + 1);
+      removed.push(id + '  ' + label + '  (' + tabName + ')');
+      writeLog_(ss, stamp, 'editor-cleanup', id, label,
+                [{ field: '(row deleted)', from: label, to: '' }], 'apps-script');
+    }
+  });
+
+  bumpVersion_();
+
+  var missing = [];
+  ids.forEach(function (i) {
+    var hit = removed.some(function (line) { return line.indexOf(String(i).trim() + ' ') === 0; });
+    if (!hit) missing.push(i);
+  });
+
+  Logger.log('removed ' + removed.length + ' row(s):\n  ' + (removed.join('\n  ') || '(none)'));
+  if (missing.length) Logger.log('not found: ' + missing.join(', '));
+  return { removed: removed, missing: missing };
+}
+
+/**
+ * Clears the rows left behind while wiring and testing the create path.
+ * Safe to run once and then delete this function, or keep it and edit the list
+ * whenever something needs removing.
+ */
+function cleanupTestRows() {
+  return deleteRowsByIds_([
+    'INV-0517',   // BenchIQ wiring probe
+    'INV-0518',   // BenchIQ UI test row
+    'INV-0519',   // BenchIQ spend test
+    'INV-0520',   // BenchIQ spend test 2
+    'ORD-0092'    // the matching test purchase, 3 x 89.30
+  ]);
+}
+
 /* ─────────────────────── run this to check it works ────────────────────── */
 
 /** Reads back through the same code path the web app uses. */

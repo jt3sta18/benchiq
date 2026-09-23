@@ -1000,9 +1000,12 @@ const ADD_RE=/\b(add|create|log|enter|register|catalogue|catalog)\b[^.?!]*\b(to|
 function invAdd(q,l){
   if(!dataReady('invConv')) return;
   // what did they call it? strip the request scaffolding, keep the noun
-  const term=l.replace(ADD_RE,' ')
-              .replace(/\b(we|just|purchased|bought|received|got|can|you|please|this|it|the|a|an|to|into|in|of|our|new|some|more|and|for)\b/g,' ')
-              .replace(/[^a-z0-9\s-]/g,' ').replace(/\s+/g,' ').trim();
+  const term=l
+    .replace(/\b(to|into|in|on)\s+(the\s+)?(inventory|sheet|list|stock|system|database)\b/g,' ')
+    .replace(/\b(add|create|log|enter|register|catalogue|catalog)\b/g,' ')
+    .replace(/\b(we|just|purchased|bought|received|got|can|you|please|this|it|the|an|to|into|in|of|our|new|some|more|and|for)\b/g,' ')
+    .replace(/\ba\b(?!\s*$)/g,' ')          // article, unless it is the final token
+    .replace(/[^a-z0-9\s-]/g,' ').replace(/\s+/g,' ').trim();
   const words=searchTerms(term);
   let near=[];
   if(term.length>2) near=ITEMS.filter(it=>it[0].toLowerCase().includes(term));
