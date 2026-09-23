@@ -15,6 +15,9 @@ This also sidesteps CORS entirely, since the page only calls its own origin.
 
 1. Push this folder to a GitHub repo.
 2. In Vercel: Add New -> Project -> import the repo. No build settings needed.
+   `vercel.json` raises the API function timeout to 30s — the default ~10s
+   is not always enough for a cold Apps Script round-trip, which surfaces as
+   an intermittent 504 on /api/data.
 3. Settings -> Environment Variables, add both (all environments):
 
        SHEET_ENDPOINT   the /exec URL
