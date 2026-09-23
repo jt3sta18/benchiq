@@ -22,28 +22,11 @@
  * why the URL belongs in a Vercel environment variable, never in browser code.
  *
  * ───────────────────────────────────────────────────────────────────────────
- * ONE CHANGE IS STILL NEEDED IN Code.gs. Without it, items added through the
- * app are destroyed the next time you run buildAll — buildAll calls
- * sheet.clear() and rebuilds BenchIQ_Inventory purely from the original lab
- * tabs, so a row added here is not among the rows it writes back.
+ * Paste both this file and Code.gs. Neither needs a hand edit.
  *
- *   In Code.gs, inside buildInventoryTab, find these three lines:
- *
- *       writeTab(ss, INVENTORY_TAB, header, out);
- *       applyInventoryFormatting(ss.getSheetByName(INVENTORY_TAB), out.length);
- *       return out.length;
- *
- *   and replace them with:
- *
- *       var manual = readManualRows_(ss, header);   // items added through the app
- *       var all = out.concat(manual);
- *       writeTab(ss, INVENTORY_TAB, header, all);
- *       applyInventoryFormatting(ss.getSheetByName(INVENTORY_TAB), all.length);
- *       return all.length;
- *
- * MANUAL_TAB and readManualRows_ are both defined in THIS file, so nothing else
- * in Code.gs needs touching. maxId in buildInventoryTab already scans every
- * existing row, manual ones included, so IDs cannot collide after a rebuild.
+ * Code.gs is now an IMPORTER: it appends lab-tab rows it has not seen and never
+ * touches a row that already exists. That is what makes every column here
+ * safely writable — nothing re-derives a row behind your back any more.
  * ───────────────────────────────────────────────────────────────────────────
  */
 
@@ -52,7 +35,12 @@ var PROP_VERSION = 'BENCHIQ_VERSION';
 var CACHE_KEY    = 'benchiq_payload_v1';
 var CACHE_TTL    = 300;          // seconds; a write clears it immediately anyway
 
-/** Source Tab marker for rows created through the app rather than parsed from a lab tab. */
+/**
+ * Source Tab value for rows created through the app rather than imported from a
+ * lab tab. Provenance only — nothing depends on it now that the importer never
+ * deletes. It does keep such rows out of the importer's dedupe keys, which are
+ * built from a lab tab name plus a raw entry.
+ */
 var MANUAL_TAB = 'BenchIQ_Manual';
 
 /* ─────────────────────────────── setup ─────────────────────────────────── */
@@ -191,7 +179,22 @@ function readTab_(ss, name) {
  * Only the columns listed in WRITABLE can be changed. Every change is written
  * to BenchIQ_Log with the old and new value.
  */
-var WRITABLE = ['Status', 'Qty', 'Notes', 'Hazard', 'CAS', 'Location'];
+/**
+ * Everything a person would want to correct.
+ *
+ * Deliberately NOT writable, and why:
+ *   ID           every write targets a row by it; changing it orphans the row
+ *   Raw Entry    the key the importer dedupes on — change it and the next
+ *                import re-adds the same item as a second row
+ *   Source Tab   provenance; also part of that same dedupe key
+ *   Last Updated / Updated By   audit stamps, set by this script on every write
+ *
+ * This list was much shorter while buildAll rebuilt these tabs from scratch,
+ * because anything it re-derived would silently revert. The importer does not
+ * re-derive, so the restriction is gone.
+ */
+var WRITABLE = ['Item', 'Storage', 'Location', 'Vendor', 'Catalog #',
+                'Qty', 'Status', 'Notes', 'Hazard', 'CAS'];
 
 function doPost(e) {
   var lock = LockService.getScriptLock();
@@ -314,6 +317,14 @@ function applyCreate_(body) {
 
   var location = String(f.Location || '').trim();
 
+  // Validate the purchase BEFORE writing anything, so a bad price cannot leave
+  // an inventory row behind with no order attached to it.
+  var order = body.order || null;
+  if (order) {
+    var check = validateOrder_(order);
+    if (!check.ok) return check;
+  }
+
   // One pass: find the highest existing ID, and refuse an exact duplicate so a
   // double-submit cannot silently create two rows for one container.
   var maxId = 0;
@@ -372,35 +383,99 @@ function applyCreate_(body) {
     to: storage + (location ? ' · ' + location : '')
   }], body.source || 'benchiq');
 
+  var orderResult = null;
+  if (order) orderResult = writeOrder_(ss, order, name, f, who, stamp, body.source || 'benchiq');
+
   return {
     ok: true, id: id, item: name, created: true,
-    storage: storage, location: location, version: String(Date.now())
+    storage: storage, location: location,
+    order: orderResult, version: String(Date.now())
   };
 }
 
-/**
- * Rows created through the app, so buildAll can carry them across a rebuild.
- * Returned in the given header's column order; anything the header does not
- * name is dropped rather than shifting the remaining values along by one.
- */
-function readManualRows_(ss, header) {
-  var sheet = ss.getSheetByName(INVENTORY_TAB);
-  if (!sheet || sheet.getLastRow() < 2) return [];
+/* ─────────────────────────── orders: create ───────────────────────────────
+   Spend lives in BenchIQ_Orders — the inventory tab has no price column at all.
+   Adding an item therefore moves no spend figure unless a purchase is logged
+   with it, which is what this does. Both rows are written in the same doPost,
+   under the same lock, so a purchase cannot end up without its item. */
+
+function validateOrder_(o) {
+  if (o.Qty === '' || o.Qty === undefined || o.Qty === null) {
+    return { ok: false, error: 'purchase: missing Qty' };
+  }
+  var qty = Number(o.Qty);
+  if (isNaN(qty) || qty <= 0) return { ok: false, error: 'purchase: Qty must be a positive number' };
+
+  if (o['Unit Price'] === '' || o['Unit Price'] === undefined || o['Unit Price'] === null) {
+    return { ok: false, error: 'purchase: missing Unit Price — without it the order adds nothing to spend' };
+  }
+  var price = Number(o['Unit Price']);
+  if (isNaN(price) || price < 0) return { ok: false, error: 'purchase: Unit Price must be a number' };
+
+  return { ok: true };
+}
+
+/** item-level fields fall through to the order when the order does not set them. */
+function orderField_(o, f, key) {
+  var v = o[key];
+  if (v === undefined || v === null || String(v).trim() === '') v = f ? f[key] : '';
+  return String(v === undefined || v === null ? '' : v).trim();
+}
+
+function writeOrder_(ss, o, itemName, f, who, stamp, source) {
+  var sheet = ss.getSheetByName(ORDERS_TAB);
+  if (!sheet) return { ok: false, error: 'orders tab not found' };
 
   var values = sheet.getDataRange().getValues();
   var columns = values[0].map(function (h) { return String(h).trim(); });
   var col = {};
   columns.forEach(function (h, i) { col[h] = i; });
-  if (col['Source Tab'] === undefined) return [];
 
-  var out = [];
+  // Order ids are stable now that the importer no longer renumbers them, so a
+  // purchase logged here simply continues the same sequence.
+  var maxId = 0;
   for (var r = 1; r < values.length; r++) {
-    if (String(values[r][col['Source Tab']]).trim() !== MANUAL_TAB) continue;
-    out.push(header.map(function (h) {
-      return col[h] === undefined ? '' : values[r][col[h]];
-    }));
+    var n = parseInt(String(values[r][col['ID']]).replace(/\D/g, ''), 10);
+    if (!isNaN(n) && n > maxId) maxId = n;
   }
-  return out;
+  var id = 'ORD-' + pad(maxId + 1, 4);
+
+  var qty = Number(o.Qty);
+  var price = Number(o['Unit Price']);
+  var date = String(o.Date || '').trim() ||
+             Utilities.formatDate(stamp, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+  var row = [];
+  for (var c = 0; c < columns.length; c++) row.push('');
+
+  row[col['ID']] = id;
+  if (col['Date'] !== undefined) row[col['Date']] = date;
+  if (col['Person'] !== undefined) row[col['Person']] = String(o.Person || '').trim();
+  if (col['Vendor'] !== undefined) row[col['Vendor']] = orderField_(o, f, 'Vendor');
+  if (col['Catalog #'] !== undefined) row[col['Catalog #']] = orderField_(o, f, 'Catalog #');
+  // Description is what the spend tables show; fall back to the item's own name.
+  if (col['Description'] !== undefined) row[col['Description']] = String(o.Description || itemName || '').trim();
+  if (col['Unit Size'] !== undefined) row[col['Unit Size']] = String(o['Unit Size'] || 'each').trim();
+  if (col['Qty'] !== undefined) row[col['Qty']] = qty;
+  if (col['Unit Price'] !== undefined) row[col['Unit Price']] = price;
+  // Total is computed here, never taken from the client. It is the number every
+  // spend tile sums, so it must always equal qty x price.
+  if (col['Total'] !== undefined) row[col['Total']] = qty * price;
+  if (col['Received'] !== undefined) row[col['Received']] = String(o.Received || 'Yes').trim();
+  if (col['Grant'] !== undefined) row[col['Grant']] = String(o.Grant || '').trim();
+  if (col['Link'] !== undefined) row[col['Link']] = String(o.Link || '').trim();
+  if (col['Source Tab'] !== undefined) row[col['Source Tab']] = MANUAL_TAB;
+
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, columns.length).setValues([row]);
+
+  writeLog_(ss, stamp, who, id, String(o.Description || itemName || ''), [{
+    field: '(purchase logged)',
+    from: '',
+    to: qty + ' x ' + price + ' = ' + (qty * price) + (o.Grant ? ' · ' + o.Grant : '')
+  }], source);
+
+  return { ok: true, id: id, qty: qty, unitPrice: price, total: qty * price,
+           grant: String(o.Grant || ''), vendor: orderField_(o, f, 'Vendor'), date: date };
 }
 
 function writeLog_(ss, stamp, who, id, item, changes, source) {
@@ -474,6 +549,35 @@ function selfTestWrite() {
   var after = applyUpdate_({ id: id, fields: { Notes: '' }, who: 'selftest' });
   Logger.log('revert: ' + JSON.stringify(after));
   Logger.log('Check BenchIQ_Log — there should be two new rows.');
+}
+
+/** Adds an item WITH a purchase, checks both tabs, then removes both rows. */
+function selfTestCreateWithOrder() {
+  var probe = 'BenchIQ order selftest ' + Date.now();
+  var res = applyCreate_({
+    fields: { Item: probe, Storage: 'RT', Location: 'Shelf #1', Vendor: 'Thermofisher', 'Catalog #': 'TEST-1' },
+    order: { Qty: 2, 'Unit Price': 25.5, Grant: 'R21', Person: 'Cami', 'Unit Size': 'each' },
+    who: 'selftest'
+  });
+  Logger.log('create: ' + JSON.stringify(res));
+  if (!res.ok) { Logger.log('STOPPED — nothing to clean up.'); return res; }
+  Logger.log('order total should be 51 -> ' + (res.order && res.order.total));
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var inv = ss.getSheetByName(INVENTORY_TAB);
+  var iv = inv.getDataRange().getValues();
+  for (var r = iv.length - 1; r >= 1; r--) {
+    if (String(iv[r][0]).trim() === res.id) { inv.deleteRow(r + 1); break; }
+  }
+  if (res.order && res.order.id) {
+    var ord = ss.getSheetByName(ORDERS_TAB);
+    var ov = ord.getDataRange().getValues();
+    for (var r2 = ov.length - 1; r2 >= 1; r2--) {
+      if (String(ov[r2][0]).trim() === res.order.id) { ord.deleteRow(r2 + 1); break; }
+    }
+  }
+  Logger.log('both test rows removed. BenchIQ_Log should show (created) and (purchase logged).');
+  return res;
 }
 
 /** Adds an item, proves the duplicate guard works, then deletes the test row. */

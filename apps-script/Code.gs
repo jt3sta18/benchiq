@@ -1,17 +1,25 @@
 /**
- * BenchIQ — Step 1: build normalized Inventory and Orders tabs.
+ * BenchIQ — Step 1: import the lab tabs into normalized Inventory and Orders tabs.
  *
- * Reads the existing lab tabs as they are, writes two NEW tabs:
- *   BenchIQ_Inventory   one row per item, with status/qty fields the app can write to
+ * Reads the existing lab tabs as they are, and fills two tabs:
+ *   BenchIQ_Inventory   one row per item, with fields the app can write to
  *   BenchIQ_Orders      one row per order, cleaned and typed
  *
- * It never modifies or deletes your existing tabs.
- * Safe to re-run: existing item IDs are preserved, and any Status / Qty / Notes
- * you (or the app) have already set are carried forward.
+ * IMPORT ONLY — it appends rows it has not seen before and NEVER touches a row
+ * that is already there. It does not clear, rewrite or renumber anything.
  *
- * Items added through the app are preserved too — see buildInventoryTab. Those
- * rows are not parsed from a lab tab, so without that step a rebuild would
- * delete them. readManualRows_ and MANUAL_TAB live in the Endpoints file.
+ * That matters: once you add and edit through the app, these two tabs are the
+ * lab's real inventory. An earlier version of this script rebuilt them from
+ * scratch on every run, which silently reverted any edit the app had made to
+ * Item, Storage, Location, Vendor or Catalog #, and would have deleted rows
+ * created in the app entirely. Importing instead of rebuilding removes that
+ * whole class of problem, and is why every column is now safely writable.
+ *
+ * The trade: an edit made in an original lab tab no longer propagates. Make
+ * corrections in the app, or in BenchIQ_Inventory directly.
+ *
+ * It never modifies or deletes your existing lab tabs.
+ * Safe to re-run at any time.
  *
  * HOW TO RUN
  *   1. Open the sheet
@@ -71,7 +79,7 @@ function buildAll() {
   var ord = buildOrdersTab(ss, report);
   ensureLogTab(ss);
 
-  report.unshift('BenchIQ build complete — ' + inv + ' inventory rows, ' + ord + ' order rows.');
+  report.unshift('BenchIQ import complete — ' + inv + ' inventory rows, ' + ord + ' order rows.');
   var msg = report.join('\n');
   Logger.log(msg);
   try { SpreadsheetApp.getActive().toast(inv + ' items, ' + ord + ' orders', 'BenchIQ', 10); } catch (e) {}
@@ -82,7 +90,7 @@ function buildAll() {
 
 function buildInventoryTab(ss, report) {
   report = report || [];
-  var existing = readExistingInventory(ss);
+  var known = readInventoryKeys_(ss);     // { keys: {}, maxId: n, sheet: sheet|null }
   var rows = [];
 
   ss.getSheets().forEach(function (sheet) {
@@ -103,55 +111,70 @@ function buildInventoryTab(ss, report) {
     report.push('  ' + name + ': ' + (rows.length - before) + ' items');
   });
 
-  // Stable IDs: keep the one a row already had, mint new ones for new entries.
-  // This scans every existing row, app-added ones included, so a manually
-  // created item can never have its ID handed to something else.
-  var maxId = 0;
-  Object.keys(existing).forEach(function (k) {
-    var n = parseInt(String(existing[k].id).replace(/\D/g, ''), 10);
-    if (n > maxId) maxId = n;
-  });
-
-  var out = rows.map(function (r) {
-    var key = r.sourceTab + '||' + r.raw;
-    var prev = existing[key];
-    var id = prev ? prev.id : 'INV-' + pad(++maxId, 4);
-    return [
-      id,
-      r.item,
-      r.raw,
-      r.env,
-      r.location,
-      r.vendor,
-      r.catalog,
-      prev && prev.qty !== '' ? prev.qty : r.qty,
-      prev && prev.status ? prev.status : 'In stock',
-      prev ? prev.hazard : '',
-      prev ? prev.cas : '',
-      prev ? prev.notes : '',
-      prev ? prev.updatedAt : '',
-      prev ? prev.updatedBy : '',
-      r.sourceTab
-    ];
-  });
-
   var header = ['ID', 'Item', 'Raw Entry', 'Storage', 'Location', 'Vendor', 'Catalog #',
                 'Qty', 'Status', 'Hazard', 'CAS', 'Notes', 'Last Updated', 'Updated By', 'Source Tab'];
 
-  // Items added through the app are not parsed from any lab tab, so they are not
-  // in `out`. writeTab clears the sheet before writing, which would delete them.
-  // Carry them across the rebuild. The typeof guard means this file still runs
-  // on its own if the Endpoints file has not been pasted yet — in which case
-  // nothing could have created a manual row anyway.
-  var manual = (typeof readManualRows_ === 'function') ? readManualRows_(ss, header) : [];
-  if (manual.length) {
-    report.push('  ' + MANUAL_TAB + ': ' + manual.length + ' added through the app, preserved');
-  }
-  var all = out.concat(manual);
+  // Only rows this sheet has never seen. A row already present is left exactly
+  // as it is — including every edit made through the app.
+  var maxId = known.maxId;
+  var fresh = [];
+  rows.forEach(function (r) {
+    if (known.keys[r.sourceTab + '||' + r.raw]) return;
+    fresh.push([
+      'INV-' + pad(++maxId, 4),
+      r.item, r.raw, r.env, r.location, r.vendor, r.catalog,
+      r.qty,
+      'In stock',
+      '', '', '', '', '',
+      r.sourceTab
+    ]);
+  });
 
-  writeTab(ss, INVENTORY_TAB, header, all);
-  applyInventoryFormatting(ss.getSheetByName(INVENTORY_TAB), all.length);
-  return all.length;
+  var sheet = appendRows_(ss, INVENTORY_TAB, header, fresh);
+  var total = Math.max(0, sheet.getLastRow() - 1);
+  report.push('  ' + INVENTORY_TAB + ': ' + fresh.length + ' new, ' +
+              (total - fresh.length) + ' already present and left untouched');
+  applyInventoryFormatting(sheet, total);
+  return total;
+}
+
+/** Keys already in the inventory tab, plus the highest ID in use. */
+function readInventoryKeys_(ss) {
+  var out = { keys: {}, maxId: 0 };
+  var sheet = ss.getSheetByName(INVENTORY_TAB);
+  if (!sheet || sheet.getLastRow() < 2) return out;
+
+  var values = sheet.getDataRange().getValues();
+  var col = {};
+  values[0].forEach(function (h, i) { col[String(h).trim()] = i; });
+
+  for (var r = 1; r < values.length; r++) {
+    if (col['Source Tab'] !== undefined && col['Raw Entry'] !== undefined) {
+      out.keys[cell(values[r][col['Source Tab']]) + '||' + cell(values[r][col['Raw Entry']])] = true;
+    }
+    var n = parseInt(String(values[r][col['ID']]).replace(/\D/g, ''), 10);
+    if (!isNaN(n) && n > out.maxId) out.maxId = n;
+  }
+  return out;
+}
+
+/**
+ * Appends to a tab, creating it with its header if absent. Never clears, so a
+ * row that is already there — however it got there — survives every run.
+ */
+function appendRows_(ss, name, header, rows) {
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.getRange(1, 1, 1, header.length).setValues([header]);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, header.length)
+         .setFontWeight('bold').setBackground('#0f3d3e').setFontColor('#ffffff');
+  }
+  if (rows.length) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, header.length).setValues(rows);
+  }
+  return sheet;
 }
 
 /** Locations as column headings, items listed underneath. Handles stacked blocks. */
@@ -264,6 +287,8 @@ function splitVendor(text) {
 
 function buildOrdersTab(ss, report) {
   report = report || [];
+  var known = readOrderKeys_(ss);        // { keys: {}, maxId: n }
+  var maxId = known.maxId;
   var out = [];
 
   ss.getSheets().forEach(function (sheet) {
@@ -287,8 +312,18 @@ function buildOrdersTab(ss, report) {
 
       var qty  = toNumber(pick(row, map.qty));
       var unit = toNumber(pick(row, map.price));
+
+      // Orders have no natural key, so identity is the source tab plus the
+      // fields that together identify a purchase line. Previously ids were
+      // positional and every run renumbered them, which meant ORD-0042 could
+      // come to mean a different purchase.
+      var key = name + '||' + cell(pick(row, map.date)) + '||' + person + '||' +
+                desc + '||' + vendor + '||' + qty + '||' + unit;
+      if (known.keys[key]) continue;
+      known.keys[key] = true;
+
       out.push([
-        'ORD-' + pad(out.length + 1, 4),
+        'ORD-' + pad(++maxId, 4),
         toDate(pick(row, map.date)),
         person,
         vendor,
@@ -311,9 +346,33 @@ function buildOrdersTab(ss, report) {
   var header = ['ID', 'Date', 'Person', 'Vendor', 'Catalog #', 'Description', 'Unit Size',
                 'Qty', 'Unit Price', 'Total', 'Quote', 'Received', 'Grant', 'Link', 'Source Tab'];
 
-  writeTab(ss, ORDERS_TAB, header, out);
-  applyOrdersFormatting(ss.getSheetByName(ORDERS_TAB), out.length);
-  return out.length;
+  var sheet = appendRows_(ss, ORDERS_TAB, header, out);
+  var total = Math.max(0, sheet.getLastRow() - 1);
+  report.push('  ' + ORDERS_TAB + ': ' + out.length + ' new, ' +
+              (total - out.length) + ' already present and left untouched');
+  applyOrdersFormatting(sheet, total);
+  return total;
+}
+
+/** Keys already in the orders tab, plus the highest ID in use. */
+function readOrderKeys_(ss) {
+  var out = { keys: {}, maxId: 0 };
+  var sheet = ss.getSheetByName(ORDERS_TAB);
+  if (!sheet || sheet.getLastRow() < 2) return out;
+
+  var values = sheet.getDataRange().getValues();
+  var col = {};
+  values[0].forEach(function (h, i) { col[String(h).trim()] = i; });
+
+  for (var r = 1; r < values.length; r++) {
+    var row = values[r];
+    var g = function (n) { return col[n] === undefined ? '' : cell(row[col[n]]); };
+    out.keys[g('Source Tab') + '||' + g('Date') + '||' + g('Person') + '||' +
+             g('Description') + '||' + g('Vendor') + '||' + g('Qty') + '||' + g('Unit Price')] = true;
+    var n2 = parseInt(String(row[col['ID']]).replace(/\D/g, ''), 10);
+    if (!isNaN(n2) && n2 > out.maxId) out.maxId = n2;
+  }
+  return out;
 }
 
 function looksLikeOrdersTab(values) {
@@ -368,33 +427,6 @@ function pick(row, idxList) {
 }
 
 /* ─────────────────────────────── plumbing ──────────────────────────────── */
-
-function readExistingInventory(ss) {
-  var sheet = ss.getSheetByName(INVENTORY_TAB);
-  var out = {};
-  if (!sheet || sheet.getLastRow() < 2) return out;
-
-  var values = sheet.getDataRange().getValues();
-  var hdr = values[0].map(function (h) { return String(h).trim(); });
-  var col = {};
-  hdr.forEach(function (h, i) { col[h] = i; });
-
-  for (var r = 1; r < values.length; r++) {
-    var row = values[r];
-    var key = cell(row[col['Source Tab']]) + '||' + cell(row[col['Raw Entry']]);
-    out[key] = {
-      id:        cell(row[col['ID']]),
-      qty:       row[col['Qty']] === 0 ? 0 : cell(row[col['Qty']]),
-      status:    cell(row[col['Status']]),
-      hazard:    cell(row[col['Hazard']]),
-      cas:       cell(row[col['CAS']]),
-      notes:     cell(row[col['Notes']]),
-      updatedAt: cell(row[col['Last Updated']]),
-      updatedBy: cell(row[col['Updated By']])
-    };
-  }
-  return out;
-}
 
 function writeTab(ss, name, header, rows) {
   var sheet = ss.getSheetByName(name);

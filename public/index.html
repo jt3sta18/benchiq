@@ -191,6 +191,12 @@
   .confirm-row .field:focus { outline:none; border-color:var(--teal2); background:rgba(45,212,191,.07); }
   .confirm-row .field option { background:var(--card); color:var(--white); }
   .confirm-row .field::placeholder { color:var(--muted); }
+  .confirm-split { display:flex; align-items:center; gap:10px; margin:16px 0 4px; font-size:11px; font-weight:700; letter-spacing:1.4px; text-transform:uppercase; color:var(--muted); }
+  .confirm-split::after { content:''; flex:1; height:1px; background:rgba(255,255,255,.10); }
+  .confirm-split input[type=checkbox] { width:14px; height:14px; accent-color:var(--teal2); cursor:pointer; }
+  .confirm-split label { cursor:pointer; letter-spacing:1.4px; }
+  .order-total { font-family:'DM Mono',monospace; font-size:15px; font-weight:600; color:var(--teal2); }
+  .order-off { opacity:.4; pointer-events:none; }
   .err-note { padding:13px 15px; border-radius:10px; border:1px solid rgba(248,113,113,.3); background:rgba(248,113,113,.08); color:#fca5a5; font-size:12.5px; line-height:1.6; }
   .skel { height:10px; border-radius:100px; background:linear-gradient(90deg,rgba(255,255,255,.06),rgba(255,255,255,.13),rgba(255,255,255,.06)); background-size:200% 100%; animation:sk 1.3s linear infinite; }
   @keyframes sk { from{background-position:200% 0} to{background-position:-200% 0} }
@@ -1012,12 +1018,20 @@ function invAdd(q,l){
   const opts=['RT','4C','-20C','-80C'].map(e=>
     '<option value="'+e+'"'+(e===guess?' selected':'')+'>'+esc(envLabel(e))+'</option>').join('');
 
-  // a datalist needs an id, and a thread can hold several of these cards
-  const listId='vendors-'+(++CARD_N);
+  // datalists need ids, and a thread can hold several of these cards
+  const n=++CARD_N;
+  const listId='vendors-'+n, sizeId='sizes-'+n, buyId='buy-'+n;
   const vendorOpts=knownVendors().map(v=>'<option value="'+esc(v)+'">').join('');
+  const sizeOpts=distinct(ORDERS,o=>o.unitSize).map(s=>'<option value="'+esc(s)+'">').join('');
+  // Grant and person come from the orders data, so a new purchase lands in the
+  // same buckets the dashboard already totals rather than creating new ones.
+  const grantOpts='<option value="">not assigned</option>'+
+    distinct(ORDERS,o=>o.grant).map(g=>'<option value="'+esc(g)+'">'+esc(g)+'</option>').join('');
+  const personOpts='<option value="">not recorded</option>'+
+    distinct(ORDERS,o=>o.person).map(p=>'<option value="'+esc(p)+'">'+esc(p)+'</option>').join('');
 
   pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div>'+
-    '<div class="answer-lead">I can add it. Check the details below — <b>Item</b> and <b>Storage</b> are required, the rest can stay blank.</div>'+
+    '<div class="answer-lead">I can add it. <b>Item</b> and <b>Storage</b> are required; the rest can stay blank. Leaving the purchase on writes a matching line to the orders tab, which is what keeps <b>spend by vendor and by grant</b> correct.</div>'+
     (near.length
       ? '<div class="gap-note" style="margin-bottom:13px"><b>'+(near.length===1?'Something similar is already catalogued':near.length+' similar items are already catalogued')+'</b> — worth checking this isn\'t the same reagent under another name before you add a second entry.</div>'+
         '<div class="tbl-wrap" style="margin-bottom:13px"><table class="data"><thead><tr><th>Reagent</th><th>Storage</th><th>Location</th><th>Status</th><th>Sheet row</th></tr></thead><tbody>'+rows+'</tbody></table>'+
@@ -1028,11 +1042,25 @@ function invAdd(q,l){
     '<div class="confirm-row"><span>Storage</span><select class="field js-storage">'+(guess?'':'<option value="">choose one…</option>')+opts+'</select></div>'+
     '<div class="confirm-row"><span>Location</span><input class="field js-loc" placeholder="Shelf #1 · Box 4 · RACK 11 · Box 1"></div>'+
     '<div class="confirm-row"><span>Vendor</span><input class="field js-vendor" list="'+listId+'" placeholder="who it came from — pick a listed name to keep spend grouped"><datalist id="'+listId+'">'+vendorOpts+'</datalist></div>'+
+    '<div class="confirm-row"><span>Catalog #</span><input class="field js-cat" placeholder="optional — copied to the purchase too"></div>'+
     '<div class="confirm-row"><span>Qty</span><input class="field js-qty" placeholder="blank = not recorded"></div>'+
     '<div class="confirm-row"><span>Notes</span><input class="field js-notes" placeholder="optional"></div>'+
+
+    // Spend is totalled from the orders tab, so an item added on its own never
+    // moves a spend figure. On by default: if you bought it, it was a purchase.
+    '<div class="confirm-split"><input type="checkbox" class="js-buy" id="'+buyId+'" checked onchange="toggleBuy(this)"><label for="'+buyId+'">Also log this as a purchase</label></div>'+
+    '<div class="js-order">'+
+      '<div class="confirm-row"><span>Qty ordered</span><input class="field js-oqty" placeholder="e.g. 2" oninput="recalcTotal(this)"></div>'+
+      '<div class="confirm-row"><span>Unit size</span><input class="field js-osize" list="'+sizeId+'" placeholder="each" ><datalist id="'+sizeId+'">'+sizeOpts+'</datalist></div>'+
+      '<div class="confirm-row"><span>Unit price</span><input class="field js-oprice" placeholder="e.g. 89.00" oninput="recalcTotal(this)"></div>'+
+      '<div class="confirm-row"><span>Total</span><span class="order-total js-ototal">—</span></div>'+
+      '<div class="confirm-row"><span>Grant</span><select class="field js-ogrant">'+grantOpts+'</select></div>'+
+      '<div class="confirm-row"><span>Ordered by</span><select class="field js-operson">'+personOpts+'</select></div>'+
+      '<div class="confirm-row"><span>Date</span><input class="field js-odate" type="date" value="'+esc(today())+'"></div>'+
+    '</div>'+
     '<div class="confirm-row"><span>By</span><span>'+esc(WHO)+' · just now</span></div>'+
     '<div class="confirm-actions"><button class="btn-confirm" onclick="confirmCreate(this,false)">Add to inventory</button><button class="btn-cancel" onclick="this.closest(\'.confirm\').querySelector(\'.confirm-actions\').innerHTML=\'<span style=color:var(--muted);font-size:13px>Cancelled — nothing added.</span>\'">Cancel</button></div>'+
-    '<div class="audit-note"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>The sheet assigns the ID. Hazard and CAS are left empty rather than guessed, and the row is marked so a rebuild of the sheet keeps it. Vendor records where this item came from — the spend tiles are totalled from the orders tab, where the prices are, so adding it here does not change them.</div>'+
+    '<div class="audit-note"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>The sheet assigns the ID. Hazard and CAS are left empty rather than guessed, and the row is marked so a rebuild of the sheet keeps it. With the purchase left on, this writes two rows in one go — the item to BenchIQ_Inventory and the order to BenchIQ_Orders — and both land in BenchIQ_Log. Total is computed in the sheet as qty × price, never sent from this page.</div>'+
     '</div></div>');
 }
 
@@ -1078,6 +1106,25 @@ function guessStorage(l){
   return '';
 }
 
+function today(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function toggleBuy(cb){
+  const block=cb.closest('.confirm').querySelector('.js-order');
+  if(block) block.classList.toggle('order-off',!cb.checked);
+}
+/* Shown live so the number going into the spend tiles is visible before it is
+   written, rather than appearing in the sheet afterwards. */
+function recalcTotal(el){
+  const box=el.closest('.confirm');
+  const q=Number(box.querySelector('.js-oqty').value);
+  const p=Number(box.querySelector('.js-oprice').value);
+  const out=box.querySelector('.js-ototal');
+  out.textContent=(isFinite(q)&&isFinite(p)&&q>0&&p>=0&&box.querySelector('.js-oqty').value&&box.querySelector('.js-oprice').value)
+    ? fmtMoney(q*p) : '—';
+}
+
 /* Writes a brand new row. Separate from confirmUpdate: that one changes a row
    which exists and is reversible through the app, this one adds a row that
    currently has no way back out, so it asks before creating a near-duplicate. */
@@ -1085,7 +1132,11 @@ async function confirmCreate(btn,force){
   const box=btn.closest('.confirm');
   const actions=box.querySelector('.confirm-actions');
   const val=sel=>{const el=box.querySelector(sel);return el?String(el.value).trim():'';};
-  const name=val('.js-name'), storage=val('.js-storage'), loc=val('.js-loc'), qty=val('.js-qty'), notes=val('.js-notes'), vendor=val('.js-vendor');
+  const name=val('.js-name'), storage=val('.js-storage'), loc=val('.js-loc'), qty=val('.js-qty'), notes=val('.js-notes'), vendor=val('.js-vendor'), cat=val('.js-cat');
+  const buyEl=box.querySelector('.js-buy');
+  const buying=!!(buyEl&&buyEl.checked);
+  const oqty=val('.js-oqty'), oprice=val('.js-oprice'), ogrant=val('.js-ogrant'),
+        operson=val('.js-operson'), odate=val('.js-odate'), osize=val('.js-osize');
 
   const fail=html=>{
     const old=box.querySelector('.err-note'); if(old) old.remove();
@@ -1097,12 +1148,28 @@ async function confirmCreate(btn,force){
   if(!name){ fail('<b>Not added.</b> An item name is required.'); return; }
   if(!storage){ fail('<b>Not added.</b> Pick a storage environment — without one the item would be missing from every dashboard tile.'); return; }
   if(qty&&isNaN(Number(qty))){ fail('<b>Not added.</b> Qty must be a number, or blank for "not recorded".'); return; }
+  if(buying){
+    if(!oqty||!(Number(oqty)>0)){ fail('<b>Not added.</b> The purchase needs a quantity ordered — or untick "also log this as a purchase".'); return; }
+    if(!oprice||isNaN(Number(oprice))||Number(oprice)<0){ fail('<b>Not added.</b> The purchase needs a unit price. Without it the order contributes nothing to spend, which defeats logging it — or untick the purchase.'); return; }
+    if(!vendor){ fail('<b>Not added.</b> A purchase needs a vendor, otherwise it cannot be counted in spend by vendor.'); return; }
+  }
 
   const fields={Item:name,Storage:storage};
   if(loc) fields.Location=loc;
   if(vendor) fields.Vendor=vendor;
+  if(cat) fields['Catalog #']=cat;
   if(qty) fields.Qty=Number(qty);
   if(notes) fields.Notes=notes;
+
+  let order=null;
+  if(buying){
+    order={Qty:Number(oqty),'Unit Price':Number(oprice),Vendor:vendor,Description:name};
+    if(cat) order['Catalog #']=cat;
+    if(osize) order['Unit Size']=osize;
+    if(ogrant) order.Grant=ogrant;
+    if(operson) order.Person=operson;
+    if(odate) order.Date=odate;
+  }
 
   const restore=actions.innerHTML;
   const oldErr=box.querySelector('.err-note'); if(oldErr) oldErr.remove();
@@ -1110,7 +1177,7 @@ async function confirmCreate(btn,force){
   try{
     const r=await fetch('/api/create',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({fields:fields,who:WHO,force:force===true})
+      body:JSON.stringify({fields:fields,order:order,who:WHO,force:force===true})
     });
     const p=await r.json().catch(()=>null);
 
@@ -1122,8 +1189,15 @@ async function confirmCreate(btn,force){
     }
     if(!r.ok||!p||!p.ok) throw new Error((p&&(p.hint||p.error))||('the sheet returned HTTP '+r.status));
 
-    actions.innerHTML='<span style="color:var(--teal2);font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Added — '+esc(name)+' is in the sheet as '+esc(String(p.id||''))+', '+esc(envLabel(storage))+(loc?' · '+esc(loc):'')+'.</span>';
+    const ord=p.order&&p.order.ok?p.order:null;
+    actions.innerHTML='<span style="color:var(--teal2);font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Added — '+esc(name)+' is in the sheet as '+esc(String(p.id||''))+', '+esc(envLabel(storage))+(loc?' · '+esc(loc):'')+
+      (ord?'. Purchase logged as '+esc(String(ord.id))+' — '+ord.qty+' × '+fmtMoney(ord.unitPrice)+' = <b>'+fmtMoney(ord.total)+'</b>'+(ord.grant?' on the '+esc(ord.grant):'')+', now counted in spend.':'.')+'</span>';
     box.querySelectorAll('.field').forEach(el=>{el.disabled=true;});
+    if(buying&&!ord){
+      // The sheet accepted the item but returned nothing for the purchase —
+      // an Apps Script deployed before the order action ignores it silently.
+      fail('<b>The item saved, but the purchase did not.</b> The sheet returned no order, which means the Apps Script deployed there predates it. <b>Spend has not changed.</b> Paste the current apps-script/Endpoints.gs and Code.gs, re-deploy with Manage deployments → edit → New version, then log the purchase again.');
+    }
     await refetchAfterWrite();
   }catch(e){
     actions.innerHTML=restore;
