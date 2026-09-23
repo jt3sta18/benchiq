@@ -645,7 +645,11 @@ function startAnswer(kind,q){ document.getElementById(kind+'Welcome').style.disp
 function askInv(q){
   startAnswer('inv',q);
   const l=q.toLowerCase();
-  if(/\bsds\b|\bmsds\b|safety (data )?sheet|\bppe\b|protective equip|how (do i|to) (store|handle|dispose)|dispose of|disposal|first aid|spill|hazards? (of|for)/.test(l)){
+  // Checked first: "undo that last change" must not fall through to a search,
+  // where "last" would match inside names like "b-last-icidin".
+  if(REVERT_RE.test(l)){
+    invRevert(q,l);
+  } else if(/\bsds\b|\bmsds\b|safety (data )?sheet|\bppe\b|protective equip|how (do i|to) (store|handle|dispose)|dispose of|disposal|first aid|spill|hazards? (of|for)/.test(l)){
     invSDS(q,l);
   } else if(/spend|spent|cost|budget|paid|price|invoice|\$|vendor|supplier|fisher|sigma|abcam|rpeptide|nicoya|order(ed|ing)?\b|purchas|last order/.test(l) && !/where|located|find|do we have/.test(l)){
     invOrdering(q,l);
@@ -657,6 +661,12 @@ function askInv(q){
   requestAnimationFrame(()=>setTimeout(fillBars,60)); scrollEnd();
 }
 
+/* These describe the request, not a reagent. "last" is the one that bit:
+   it is a substring of blasticidin and fibroblasts, so "undo that last change"
+   came back as two confident, unrelated matches. */
+const SEARCH_STOP=new Set(['undo','undone','revert','reverted','restore','restored','cancel','cancelled','canceled','reverse','rollback','change','changes','changed','update','updates','updated','last','latest','previous','recent','that','this','these','those','thing','item','items','entry','entries','inventory','stock','again','back','please','just','make','made','something','anything','everything','what','which','were','have','from','with','about','there','their','them']);
+function searchTerms(term){ return term.split(' ').filter(w=>w.length>3&&!SEARCH_STOP.has(w)); }
+
 function invSearch(q,l){
   if(!dataReady('invConv')) return;
   // pull candidate terms: strip filler words
@@ -664,8 +674,8 @@ function invSearch(q,l){
   let matches=ITEMS.filter(it=>it[0].toLowerCase().includes(term));
   if(term.length<2||matches.length===0){
     // try matching any significant word
-    const words=term.split(' ').filter(w=>w.length>3);
-    matches=ITEMS.filter(it=>words.some(w=>it[0].toLowerCase().includes(w)));
+    const words=searchTerms(term);
+    matches=words.length?ITEMS.filter(it=>words.some(w=>it[0].toLowerCase().includes(w))):[];
   }
   if(matches.length===0){
     pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div><div class="answer-lead">I couldn\'t find anything matching <b>'+esc(term||q)+'</b> in the '+ITEMS.length+' catalogued items. It may be logged under a different name, or not yet entered. Want me to check the ordering history instead?</div></div>');
@@ -907,6 +917,65 @@ function invSpendOverview(){
     '</div>');
 }
 
+/* ─────────── UNDO / REVERT ───────────
+   This app makes exactly one kind of write — Status to Depleted, Qty to 0 — so
+   the one it can reverse is that write. Reverting means finding rows that sit in
+   that state and putting them back.
+
+   Qty goes back to blank rather than to a number: the previous quantity is not
+   recoverable from the inventory tab, only from BenchIQ_Log, so restoring "0" or
+   inventing a count would both be wrong. Blank means not recorded, which is true. */
+const REVERT_RE=/\b(undo|undid|revert|reverse|rollback|roll back|restore|unmark|un-mark)\b|\bcancel (that|the|my|this|last)\b|\bput (it|that|them) back\b|\bback in stock\b|\bnot (actually )?(depleted|used)\b|\bdidn'?t (use|run out)\b|\bmark .* (as )?in stock\b/;
+
+function invRevert(q,l){
+  if(!dataReady('invConv')) return;
+  const depleted=ITEMS.filter(it=>it[6]==='Depleted');
+
+  // did they name something specific?
+  const term=l.replace(REVERT_RE,' ').replace(/\b(the|a|an|of|to|for|my|our|we|i|it|on|inventory|change|update|item|entry|last|that|this|please)\b/g,' ').replace(/[^a-z0-9\s-]/g,' ').replace(/\s+/g,' ').trim();
+  let named=null;
+  if(term.length>2){
+    named=ITEMS.find(it=>it[0].toLowerCase().includes(term))
+       || ITEMS.find(it=>{const w=searchTerms(term); return w.length&&w.some(x=>it[0].toLowerCase().includes(x));});
+  }
+
+  if(named && named[6]!=='Depleted'){
+    pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div>'+
+      '<div class="answer-lead"><b>'+esc(named[0])+'</b> ('+esc(named[5])+') is currently <b>'+esc(named[6]||'—')+'</b>, not Depleted — so there\'s nothing on it to undo.</div>'+
+      (depleted.length?'<div class="gap-note" style="margin-top:12px">'+depleted.length+' other item'+(depleted.length>1?'s are':' is')+' marked Depleted. Ask again without naming an item to see '+(depleted.length>1?'them':'it')+'.</div>':'')+
+      '</div>');
+    return;
+  }
+
+  const targets=named?[named]:depleted;
+
+  if(!targets.length){
+    pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div>'+
+      '<div class="answer-lead">There\'s nothing to undo — <b>no item in the sheet is currently marked Depleted</b>, so this app hasn\'t left a change outstanding.</div>'+
+      '<div class="gap-note" style="margin-top:12px">This only sees the <i>current</i> state of the inventory tab. Edits made directly in Google Sheets, and the full before/after history of every write, live in the <b>BenchIQ_Log</b> tab — this app doesn\'t read that tab yet, so it can\'t replay or reverse anything older than the state above.</div>'+
+      '</div>');
+    return;
+  }
+
+  const cards=targets.map(m=>
+    '<div class="confirm" style="margin-top:12px"><div class="confirm-h"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>Proposed revert</div>'+
+    '<div class="confirm-row"><span>Item</span><span>'+esc(m[0])+'</span></div>'+
+    '<div class="confirm-row"><span>Sheet row</span><span class="mono">'+esc(m[5])+'</span></div>'+
+    '<div class="confirm-row"><span>Status</span><span>Depleted → <b style="color:var(--teal2)">In stock</b></span></div>'+
+    '<div class="confirm-row"><span>Qty</span><span>0 → <b style="color:var(--teal2)">not recorded</b></span></div>'+
+    '<div class="confirm-row"><span>By</span><span>'+esc(WHO)+' · just now</span></div>'+
+    '<div class="confirm-actions"><button class="btn-confirm" onclick="confirmUpdate(this,\''+esc(m[5])+'\',\'restore\')">Confirm revert</button><button class="btn-cancel" onclick="this.closest(\'.confirm\').querySelector(\'.confirm-actions\').innerHTML=\'<span style=color:var(--muted);font-size:13px>Cancelled — no changes made.</span>\'">Cancel</button></div>'+
+    '</div>').join('');
+
+  pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div>'+
+    '<div class="answer-lead">'+(targets.length===1
+      ? 'I can put <b>'+esc(targets[0][0])+'</b> back to <b>In stock</b>. Here\'s what that writes.'
+      : 'There are <b>'+targets.length+' items</b> currently marked Depleted. Confirm whichever you want put back.')+'</div>'+
+    '<div class="gap-note">Quantity goes back to <b>not recorded</b> rather than to a number. The count before the change isn\'t in the inventory tab, and I\'m not going to invent one.</div>'+
+    cards+
+    '</div>');
+}
+
 function invUpdate(q,l){
   if(!dataReady('invConv')) return;
   // find the item mentioned
@@ -929,13 +998,21 @@ function invUpdate(q,l){
     '<div class="confirm-row"><span>Status</span><span>'+esc(m[6]||'—')+' → <b style="color:var(--amber)">Depleted</b></span></div>'+
     '<div class="confirm-row"><span>Qty</span><span>'+esc(qtyNow)+' → <b style="color:var(--amber)">0</b></span></div>'+
     '<div class="confirm-row"><span>By</span><span>'+esc(WHO)+' · just now</span></div>'+
-    '<div class="confirm-actions"><button class="btn-confirm" onclick="confirmUpdate(this,\''+esc(m[5])+'\')">Confirm update</button><button class="btn-cancel" onclick="this.closest(\'.confirm\').querySelector(\'.confirm-actions\').innerHTML=\'<span style=color:var(--muted);font-size:13px>Cancelled — no changes made.</span>\'">Cancel</button></div>'+
+    '<div class="confirm-actions"><button class="btn-confirm" onclick="confirmUpdate(this,\''+esc(m[5])+'\',\'deplete\')">Confirm update</button><button class="btn-cancel" onclick="this.closest(\'.confirm\').querySelector(\'.confirm-actions\').innerHTML=\'<span style=color:var(--muted);font-size:13px>Cancelled — no changes made.</span>\'">Cancel</button></div>'+
     '<div class="audit-note"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Writes go through /api/update to the sheet row above, and are appended to the BenchIQ_Log tab with the old value, the new value, who, and when.</div>'+
     '</div></div>');
 }
 /* 2.3 — the real write. Success is only shown once the sheet has confirmed it.
    On failure the confirm buttons stay put so the user can simply try again. */
-async function confirmUpdate(btn,id){
+/* The real write. Success is only shown once the sheet confirms it; on failure
+   the confirm buttons stay put so the user can simply try again. */
+const WRITE_ACTIONS={
+  deplete:{ fields:{Status:'Depleted',Qty:0},      done:'is now Depleted in the sheet' },
+  restore:{ fields:{Status:'In stock',Qty:''},     done:'is back to In stock, quantity cleared to not recorded' }
+};
+
+async function confirmUpdate(btn,id,action){
+  const spec=WRITE_ACTIONS[action||'deplete'];
   const box=btn.closest('.confirm');
   const actions=box.querySelector('.confirm-actions');
   const item=ITEMS.find(it=>it[5]===id);
@@ -947,11 +1024,11 @@ async function confirmUpdate(btn,id){
     const r=await fetch('/api/update',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({id:id,fields:{Status:'Depleted',Qty:0},who:WHO})
+      body:JSON.stringify({id:id,fields:spec.fields,who:WHO})
     });
     const p=await r.json().catch(()=>null);
     if(!r.ok||!p||!p.ok) throw new Error((p&&(p.error||p.message))||('the sheet returned HTTP '+r.status));
-    actions.innerHTML='<span style="color:var(--teal2);font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Written — '+esc(name)+' ('+esc(id)+') is now Depleted in the sheet, and the change is in BenchIQ_Log.</span>';
+    actions.innerHTML='<span style="color:var(--teal2);font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Written — '+esc(name)+' ('+esc(id)+') '+spec.done+', and the change is in BenchIQ_Log.</span>';
     await refetchAfterWrite();      // so the dashboard and the next answer both reflect it
   }catch(e){
     actions.innerHTML=restore;      // buttons back, so Confirm can be pressed again
