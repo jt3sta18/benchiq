@@ -445,6 +445,7 @@
 
      [0] name  [1] storage  [2] location  [3] hazard  [4] cas
      [5] sheet ID — required for writes   [6] status  [7] qty (null = unknown)
+     [8] vendor — provenance only; spend is totalled from the orders tab
 
    Hazard and CAS are blank for every row in the sheet today. They are carried
    through as-is and reported as missing. They are never inferred.              */
@@ -465,7 +466,8 @@ function applyPayload(p){
   ITEMS=p.inventory.rows.map(r=>[
     str(r,iix,'Item'), str(r,iix,'Storage'), str(r,iix,'Location'),
     str(r,iix,'Hazard'), str(r,iix,'CAS'),
-    str(r,iix,'ID'), str(r,iix,'Status'), num(r,iix,'Qty')
+    str(r,iix,'ID'), str(r,iix,'Status'), num(r,iix,'Qty'),
+    str(r,iix,'Vendor')
   ]);
   const oix=colIndex(p.orders.columns);
   ORDERS=p.orders.rows.map(r=>({
@@ -726,7 +728,7 @@ function invSearch(q,l){
   const rows=matches.slice(0,10).map(m=>{
     const haz=m[3]?'<span class="haz '+hazClass(m[3])+'">⚠ '+esc(m[3])+'</span>':'<span class="haz-none">not recorded</span>';
     const qty=m[7]===null?'<span class="haz-none">—</span>':'<span class="mono">'+m[7]+'</span>';
-    return '<tr><td class="name">'+esc(m[0])+'</td><td><span class="loc-chip '+envClass(m[1])+'">'+esc(envLabel(m[1]))+'</span></td><td>'+esc(m[2])+'</td><td>'+esc(m[6]||'—')+'</td><td>'+qty+'</td><td>'+haz+'</td><td>'+sdsCell(m)+'</td></tr>';
+    return '<tr><td class="name">'+esc(m[0])+'</td><td><span class="loc-chip '+envClass(m[1])+'">'+esc(envLabel(m[1]))+'</span></td><td>'+esc(m[2])+'</td><td>'+esc(m[8]||'—')+'</td><td>'+esc(m[6]||'—')+'</td><td>'+qty+'</td><td>'+haz+'</td><td>'+sdsCell(m)+'</td></tr>';
   }).join('');
   const first=matches[0];
   rememberItem(matches.length===1?first:null);   // "it" is only unambiguous with one hit
@@ -734,7 +736,7 @@ function invSearch(q,l){
     ? 'Found <b>'+esc(first[0])+'</b> — it\'s in the <b>'+esc(envLabel(first[1]))+'</b>, <b>'+esc(first[2])+'</b>.'+(first[3]?' Handle with care: flagged <b>'+esc(first[3])+'</b>.':'')
     : 'Found <b>'+matches.length+' matches</b> for "'+esc(term)+'". Here\'s where each one lives:';
   pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div><div class="answer-lead">'+lead+'</div>'+
-    '<div class="tbl-wrap"><table class="data"><thead><tr><th>Reagent</th><th>Storage</th><th>Location</th><th>Status</th><th>Qty</th><th>Hazard</th><th>SDS</th></tr></thead><tbody>'+rows+'</tbody></table>'+
+    '<div class="tbl-wrap"><table class="data"><thead><tr><th>Reagent</th><th>Storage</th><th>Location</th><th>Vendor</th><th>Status</th><th>Qty</th><th>Hazard</th><th>SDS</th></tr></thead><tbody>'+rows+'</tbody></table>'+
     '<div class="tbl-foot"><span>'+matches.length+' match'+(matches.length>1?'es':'')+(matches.length>10?' · showing 10':'')+' · Teter Lab inventory</span><span class="mono" style="color:var(--muted)">'+esc(first[5])+'</span></div></div>'+
     gapNote(matches)+
     '<div class="followups" style="margin-top:14px"><button class="fu-chip" onclick="askInv(\'How much have we spent on the R21\')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 14 3-3 3 3 5-6"/></svg>Spend by grant</button><button class="fu-chip" onclick="askInv(\'We used up the '+esc(first[0]).replace(/'/g,'')+'\')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>Mark '+esc(first[0])+' as used up</button></div>'+
@@ -1010,6 +1012,10 @@ function invAdd(q,l){
   const opts=['RT','4C','-20C','-80C'].map(e=>
     '<option value="'+e+'"'+(e===guess?' selected':'')+'>'+esc(envLabel(e))+'</option>').join('');
 
+  // a datalist needs an id, and a thread can hold several of these cards
+  const listId='vendors-'+(++CARD_N);
+  const vendorOpts=knownVendors().map(v=>'<option value="'+esc(v)+'">').join('');
+
   pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div>'+
     '<div class="answer-lead">I can add it. Check the details below — <b>Item</b> and <b>Storage</b> are required, the rest can stay blank.</div>'+
     (near.length
@@ -1021,12 +1027,37 @@ function invAdd(q,l){
     '<div class="confirm-row"><span>Item</span><input class="field js-name" value="'+esc(name)+'" placeholder="reagent name as it should appear"></div>'+
     '<div class="confirm-row"><span>Storage</span><select class="field js-storage">'+(guess?'':'<option value="">choose one…</option>')+opts+'</select></div>'+
     '<div class="confirm-row"><span>Location</span><input class="field js-loc" placeholder="Shelf #1 · Box 4 · RACK 11 · Box 1"></div>'+
+    '<div class="confirm-row"><span>Vendor</span><input class="field js-vendor" list="'+listId+'" placeholder="who it came from — pick a listed name to keep spend grouped"><datalist id="'+listId+'">'+vendorOpts+'</datalist></div>'+
     '<div class="confirm-row"><span>Qty</span><input class="field js-qty" placeholder="blank = not recorded"></div>'+
     '<div class="confirm-row"><span>Notes</span><input class="field js-notes" placeholder="optional"></div>'+
     '<div class="confirm-row"><span>By</span><span>'+esc(WHO)+' · just now</span></div>'+
     '<div class="confirm-actions"><button class="btn-confirm" onclick="confirmCreate(this,false)">Add to inventory</button><button class="btn-cancel" onclick="this.closest(\'.confirm\').querySelector(\'.confirm-actions\').innerHTML=\'<span style=color:var(--muted);font-size:13px>Cancelled — nothing added.</span>\'">Cancel</button></div>'+
-    '<div class="audit-note"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>The sheet assigns the ID. Hazard and CAS are left empty rather than guessed, and the row is marked so a rebuild of the sheet keeps it.</div>'+
+    '<div class="audit-note"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>The sheet assigns the ID. Hazard and CAS are left empty rather than guessed, and the row is marked so a rebuild of the sheet keeps it. Vendor records where this item came from — the spend tiles are totalled from the orders tab, where the prices are, so adding it here does not change them.</div>'+
     '</div></div>');
+}
+
+/* Vendors already present in the sheet, orders first.
+
+   Spend by vendor groups on an exact string match, so a free-typed "Thermo
+   Fisher" would quietly become a new vendor rather than joining the existing
+   Thermofisher total. The two tabs have already drifted this way — inventory
+   carries Thermo, Sigma, Millipore, Jackson and Pierce where orders carry
+   Thermofisher and Millipore Sigma — so offering the known spellings is the
+   difference between a vendor field and a useful one. Orders names come first
+   because those are the ones the spend tiles actually count. */
+let CARD_N = 0;
+function knownVendors(){
+  const seen=new Set(), out=[];
+  const add=function(v){
+    const k=String(v||'').trim();
+    if(!k) return;
+    const lk=k.toLowerCase();
+    if(seen.has(lk)) return;
+    seen.add(lk); out.push(k);
+  };
+  ORDERS.forEach(function(o){ add(o.vendor); });   // authoritative: these carry the spend
+  ITEMS.forEach(function(it){ add(it[8]); });      // plus whatever the inventory already uses
+  return out;
 }
 
 /* The term is lowercased for matching, which makes a poor default in a text box.
@@ -1054,7 +1085,7 @@ async function confirmCreate(btn,force){
   const box=btn.closest('.confirm');
   const actions=box.querySelector('.confirm-actions');
   const val=sel=>{const el=box.querySelector(sel);return el?String(el.value).trim():'';};
-  const name=val('.js-name'), storage=val('.js-storage'), loc=val('.js-loc'), qty=val('.js-qty'), notes=val('.js-notes');
+  const name=val('.js-name'), storage=val('.js-storage'), loc=val('.js-loc'), qty=val('.js-qty'), notes=val('.js-notes'), vendor=val('.js-vendor');
 
   const fail=html=>{
     const old=box.querySelector('.err-note'); if(old) old.remove();
@@ -1069,6 +1100,7 @@ async function confirmCreate(btn,force){
 
   const fields={Item:name,Storage:storage};
   if(loc) fields.Location=loc;
+  if(vendor) fields.Vendor=vendor;
   if(qty) fields.Qty=Number(qty);
   if(notes) fields.Notes=notes;
 
