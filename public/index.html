@@ -187,6 +187,10 @@
   /* used wherever the sheet has no data to show — the gap is stated, never filled in */
   .gap-note { padding:13px 15px; border-radius:10px; border:1px dashed rgba(255,255,255,.16); background:rgba(255,255,255,.03); color:var(--muted); font-size:12.5px; line-height:1.6; }
   .gap-note b { color:var(--soft); font-weight:600; }
+  .confirm-row .field { flex:0 1 62%; padding:8px 11px; font-size:13px; font-family:inherit; color:var(--white); background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.14); border-radius:8px; }
+  .confirm-row .field:focus { outline:none; border-color:var(--teal2); background:rgba(45,212,191,.07); }
+  .confirm-row .field option { background:var(--card); color:var(--white); }
+  .confirm-row .field::placeholder { color:var(--muted); }
   .err-note { padding:13px 15px; border-radius:10px; border:1px solid rgba(248,113,113,.3); background:rgba(248,113,113,.08); color:#fca5a5; font-size:12.5px; line-height:1.6; }
   .skel { height:10px; border-radius:100px; background:linear-gradient(90deg,rgba(255,255,255,.06),rgba(255,255,255,.13),rgba(255,255,255,.06)); background-size:200% 100%; animation:sk 1.3s linear infinite; }
   @keyframes sk { from{background-position:200% 0} to{background-position:-200% 0} }
@@ -995,21 +999,104 @@ function invAdd(q,l){
   let near=[];
   if(term.length>2) near=ITEMS.filter(it=>it[0].toLowerCase().includes(term));
   if(!near.length&&words.length) near=ITEMS.filter(it=>words.some(w=>it[0].toLowerCase().includes(w)));
-  if(near.length===1) rememberItem(near[0]); else rememberItem(null);
+  rememberItem(near.length===1?near[0]:null);
 
-  const rows=near.slice(0,6).map(m=>
+  const name=originalCase(q,term);
+  const guess=guessStorage(l);
+
+  const rows=near.slice(0,5).map(m=>
     '<tr><td class="name">'+esc(m[0])+'</td><td><span class="loc-chip '+envClass(m[1])+'">'+esc(envLabel(m[1]))+'</span></td><td>'+esc(m[2])+'</td><td>'+esc(m[6]||'—')+'</td><td class="mono">'+esc(m[5])+'</td></tr>').join('');
 
+  const opts=['RT','4C','-20C','-80C'].map(e=>
+    '<option value="'+e+'"'+(e===guess?' selected':'')+'>'+esc(envLabel(e))+'</option>').join('');
+
   pushAI('invConv',INV_AV+'<div class="ai-body"><div class="ai-name">BenchIQ Inventory</div>'+
-    '<div class="answer-lead"><b>I can\'t add new items to the inventory</b> — that isn\'t something this app can do. It can only change six fields on rows that already exist: Status, Qty, Notes, Hazard, CAS and Location. There\'s no way for it to create a row.</div>'+
-    '<div class="opp-badge">◆ NOT SUPPORTED — READ THIS INSTEAD</div>'+
+    '<div class="answer-lead">I can add it. Check the details below — <b>Item</b> and <b>Storage</b> are required, the rest can stay blank.</div>'+
     (near.length
-      ? '<div class="answer-lead" style="margin-top:4px">Before you add it by hand — <b>'+(near.length===1?'this is already catalogued':near.length+' similar items are already catalogued')+'</b>. Check whether one of these is the same reagent under a different name:</div>'+
-        '<div class="tbl-wrap"><table class="data"><thead><tr><th>Reagent</th><th>Storage</th><th>Location</th><th>Status</th><th>Sheet row</th></tr></thead><tbody>'+rows+'</tbody></table>'+
-        '<div class="tbl-foot"><span>'+near.length+' possible match'+(near.length===1?'':'es')+' for "'+esc(term)+'"</span></div></div>'
-      : '<div class="gap-note" style="margin-top:12px">Nothing in the '+ITEMS.length+' catalogued items looks like "<b>'+esc(term||q)+'</b>", so it does appear to be new.</div>')+
-    '<div class="gap-note" style="margin-top:12px"><b>To add it for real:</b> type the row straight into the Google Sheet. This page polls for changes every 45 seconds, so it will show up here on its own — no reload needed.<br><br>Making this app able to add rows means adding a create action to the Apps Script and a matching write path here. That\'s a real change, not a wording fix.</div>'+
-    '</div>');
+      ? '<div class="gap-note" style="margin-bottom:13px"><b>'+(near.length===1?'Something similar is already catalogued':near.length+' similar items are already catalogued')+'</b> — worth checking this isn\'t the same reagent under another name before you add a second entry.</div>'+
+        '<div class="tbl-wrap" style="margin-bottom:13px"><table class="data"><thead><tr><th>Reagent</th><th>Storage</th><th>Location</th><th>Status</th><th>Sheet row</th></tr></thead><tbody>'+rows+'</tbody></table>'+
+        '<div class="tbl-foot"><span>'+near.length+' possible match'+(near.length===1?'':'es')+'</span></div></div>'
+      : '')+
+    '<div class="confirm"><div class="confirm-h"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>New inventory item</div>'+
+    '<div class="confirm-row"><span>Item</span><input class="field js-name" value="'+esc(name)+'" placeholder="reagent name as it should appear"></div>'+
+    '<div class="confirm-row"><span>Storage</span><select class="field js-storage">'+(guess?'':'<option value="">choose one…</option>')+opts+'</select></div>'+
+    '<div class="confirm-row"><span>Location</span><input class="field js-loc" placeholder="Shelf #1 · Box 4 · RACK 11 · Box 1"></div>'+
+    '<div class="confirm-row"><span>Qty</span><input class="field js-qty" placeholder="blank = not recorded"></div>'+
+    '<div class="confirm-row"><span>Notes</span><input class="field js-notes" placeholder="optional"></div>'+
+    '<div class="confirm-row"><span>By</span><span>'+esc(WHO)+' · just now</span></div>'+
+    '<div class="confirm-actions"><button class="btn-confirm" onclick="confirmCreate(this,false)">Add to inventory</button><button class="btn-cancel" onclick="this.closest(\'.confirm\').querySelector(\'.confirm-actions\').innerHTML=\'<span style=color:var(--muted);font-size:13px>Cancelled — nothing added.</span>\'">Cancel</button></div>'+
+    '<div class="audit-note"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>The sheet assigns the ID. Hazard and CAS are left empty rather than guessed, and the row is marked so a rebuild of the sheet keeps it.</div>'+
+    '</div></div>');
+}
+
+/* The term is lowercased for matching, which makes a poor default in a text box.
+   Recover the user's own capitalisation from the original question. */
+function originalCase(q,term){
+  if(!term) return '';
+  const i=q.toLowerCase().indexOf(term);
+  return i>=0?q.slice(i,i+term.length).trim():term;
+}
+/* Only from an explicit temperature. Not from "shelf" — items sit on a Shelf #1
+   in three of the four environments, so that would be a coin flip presented as
+   a fact, and it is the one field the user cannot leave blank. */
+function guessStorage(l){
+  if(/-\s*80|minus 80|\b80c\b/.test(l)) return '-80C';
+  if(/-\s*20|minus 20|\b20c\b/.test(l)) return '-20C';
+  if(/\b4\s*c\b|fridge|refrigerat/.test(l)) return '4C';
+  if(/\brt\b|room temp|bench top|benchtop/.test(l)) return 'RT';
+  return '';
+}
+
+/* Writes a brand new row. Separate from confirmUpdate: that one changes a row
+   which exists and is reversible through the app, this one adds a row that
+   currently has no way back out, so it asks before creating a near-duplicate. */
+async function confirmCreate(btn,force){
+  const box=btn.closest('.confirm');
+  const actions=box.querySelector('.confirm-actions');
+  const val=sel=>{const el=box.querySelector(sel);return el?String(el.value).trim():'';};
+  const name=val('.js-name'), storage=val('.js-storage'), loc=val('.js-loc'), qty=val('.js-qty'), notes=val('.js-notes');
+
+  const fail=html=>{
+    const old=box.querySelector('.err-note'); if(old) old.remove();
+    const err=document.createElement('div');
+    err.className='err-note'; err.style.marginTop='12px'; err.innerHTML=html;
+    actions.insertAdjacentElement('afterend',err);
+  };
+
+  if(!name){ fail('<b>Not added.</b> An item name is required.'); return; }
+  if(!storage){ fail('<b>Not added.</b> Pick a storage environment — without one the item would be missing from every dashboard tile.'); return; }
+  if(qty&&isNaN(Number(qty))){ fail('<b>Not added.</b> Qty must be a number, or blank for "not recorded".'); return; }
+
+  const fields={Item:name,Storage:storage};
+  if(loc) fields.Location=loc;
+  if(qty) fields.Qty=Number(qty);
+  if(notes) fields.Notes=notes;
+
+  const restore=actions.innerHTML;
+  const oldErr=box.querySelector('.err-note'); if(oldErr) oldErr.remove();
+  actions.innerHTML='<span style="color:var(--muted);font-size:13px">Adding to the sheet…</span>';
+  try{
+    const r=await fetch('/api/create',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({fields:fields,who:WHO,force:force===true})
+    });
+    const p=await r.json().catch(()=>null);
+
+    if(p&&p.ok===false&&p.error==='already catalogued'){
+      actions.innerHTML=restore;
+      fail('<b>Not added — already catalogued</b> as <span class="mono">'+esc(String(p.existingId||''))+'</span> with the same name, storage and location. If this is a second physical container, add it anyway.'+
+           '<div style="margin-top:10px"><button class="btn-confirm" onclick="confirmCreate(this,true)">Add anyway as a separate container</button></div>');
+      return;
+    }
+    if(!r.ok||!p||!p.ok) throw new Error((p&&(p.hint||p.error))||('the sheet returned HTTP '+r.status));
+
+    actions.innerHTML='<span style="color:var(--teal2);font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Added — '+esc(name)+' is in the sheet as '+esc(String(p.id||''))+', '+esc(envLabel(storage))+(loc?' · '+esc(loc):'')+'.</span>';
+    box.querySelectorAll('.field').forEach(el=>{el.disabled=true;});
+    await refetchAfterWrite();
+  }catch(e){
+    actions.innerHTML=restore;
+    fail('<b>Not added.</b> '+esc(String((e&&e.message)||e))+' Nothing was written to the sheet.');
+  }
 }
 
 /* ─────────── UNDO / REVERT ───────────
